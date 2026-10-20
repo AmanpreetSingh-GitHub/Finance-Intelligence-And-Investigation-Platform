@@ -1,0 +1,4 @@
+business_unit_code,business_unit_name,region,base_currency,is_active
+EU,Europe,Europe,EUR,true
+IN,India,India,INR,true
+US,United States,North America,USD,true

@@ -1,0 +1,9 @@
+supplier_code,supplier_name,country,is_active
+SUP-ALPINE,Alpine Freight Partners,Germany,true
+SUP-NORTHSEA,North Sea Logistics,Netherlands,true
+SUP-METALWORKS,Continental Metalworks,Poland,true
+SUP-CHEMCORE,ChemCore Materials,Belgium,true
+SUP-BHARAT,Bharat Industrial Supply,India,true
+SUP-DECCAN,Deccan Freight Systems,India,true
+SUP-LIBERTY,Liberty Manufacturing Supply,United States,true
+SUP-PACIFIC,Pacific Haulage Group,United States,true

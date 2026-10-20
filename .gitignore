@@ -1,0 +1,42 @@
+@'
+# Python temporary files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# Local database files and backups
+pgdata/
+postgres-data/
+*.dump
+*.backup
+*.sqlite
+*.sqlite3
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local editor settings
+.cursor/
+.vscode/
+.idea/
+'@ | Set-Content -Path .gitignore -Encoding ascii
