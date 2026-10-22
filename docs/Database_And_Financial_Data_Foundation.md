@@ -1,56 +1,65 @@
 # Database and Financial Data Foundation
 
 **Project:** `Finance_Intelligence_And_Investigation_Platform`
-**Scope:** PostgreSQL 17, relational modeling, financial integrity, deterministic synthetic data, Python ingestion, SQL reconciliation, and query performance
-**Document type:** Living architecture and learning reference
+**Scope:** PostgreSQL 17, relational integrity, financial data generation and ingestion, transactional behavior, distributed-systems design, reconciliation, access boundaries, and query performance
+**Document type:** Living architecture and engineering implementation record
 
-> **How to use this document:** Read each concept from first principles, follow the FIN-AI example, and use the **Takeaway** to summarize the design decision. Verified behavior is separated from planned capabilities. This file is intended to stand on its own for the concepts covered here.
+## 1. Objective and Scope
 
-## 1. The business problem and our architecture boundary
+I implemented the initial structured-data foundation for a fictional multi-business-unit manufacturing company, Meridian Global Manufacturing. The current data covers Europe in EUR, India in INR, and the United States in USD. The reference investigation asks why Europe's operating margin declined from 18% in Q1 2026 to 14% in Q2 2026.
 
-Meridian Global Manufacturing operates in Europe (EUR), India (INR), and the United States (USD). A CFO asks: **“Why did Europe's operating margin fall from 18% in Q1 2026 to 14% in Q2?”**
+This document owns the database and data-engineering concerns behind that investigation:
 
-There are two different jobs:
+- Relational modeling, normalization, keys, and relationships.
+- PostgreSQL schema constraints, triggers, indexes, transactions, WAL, MVCC, isolation, and future RLS.
+- Synthetic financial data, CSV ingestion, natural-key resolution, rollback, and idempotency.
+- SQL reconciliation and execution-plan evidence.
+- Distributed consistency, CAP, replication, and cross-system recovery patterns as future design considerations.
 
-1. **Establish the financial facts.** Calculate revenue, expenses, profit, margins, and cost variances from governed database records. This work must be deterministic: the same approved records and formula should give the same answer.
-2. **Investigate the underlying causes.** Examine supplier contracts, pricing changes, operational records, and business context to determine *why* a cost changed. Future AI agents can help gather and synthesize that evidence, but should not invent financial figures or confuse a plausible explanation with a proven cause.
+The detailed Finance API contracts and deterministic Python calculation layer are documented in [Finance_API_Architecture_And_Implementation.md](Finance_API_Architecture_And_Implementation.md). This database record does not duplicate those application-layer details.
 
-PostgreSQL 17 is our initial system of record for **structured synthetic financial data**. We chose it for relational joins, exact monetary types, transactions, constraints, triggers, SQL analytics, and a possible future row-level security (RLS) boundary. Contract **metadata** is stored in PostgreSQL; contract **documents and evidence retrieval** are future work.
+PostgreSQL 17 is the current system of record for structured synthetic finance data and contract metadata. Contract documents, search indexes, evidence retrieval, AI investigation, cross-region replication, and production security controls are not implemented.
 
-**Why not introduce several databases immediately?** One relational database is understandable, testable, and sufficient for 216 current transactions. Additional stores, replicas, partitioning, or sharding should follow real requirements and measurements, not architecture fashion.
+**Takeaway:** I separated governed financial facts and database controls from application contracts and future probabilistic investigation components.
 
-**Takeaway:** Keep governed facts and calculations separate from probabilistic AI reasoning. Add infrastructure only when a defined requirement justifies its complexity.
+## 2. Architecture and Implementation Boundary
 
-## 2. Relational data modeling
+The implemented data flow is:
 
-### 2.1 Tables, records, keys, and relationships
+```text
+Reproducible synthetic generator
+            |
+       Six CSV datasets
+            |
+Validation and type conversion in Python
+            |
+Natural-key to BIGINT key resolution
+            |
+Single PostgreSQL import transaction
+            |
+Constraints, foreign keys, and triggers
+            |
+Independent SQL reconciliation
+```
 
-A **table** holds one kind of business information, a **row** is a record, and a **column** is a field. For example, `business_units` stores each unit's name and base currency; `financial_transactions` stores individual revenue and expense entries.
+The implemented PostgreSQL boundary stores financial facts and their reference data. The importer validates source shape and types before writing, but PostgreSQL remains the final shared integrity boundary for all writers. The SQL reconciliation independently checks persisted business meaning rather than trusting generator or importer status messages.
 
-| Concept | Meaning | FIN-AI example | Why it matters |
-|---|---|---|---|
-| Primary key (PK) | Uniquely identifies a row within its table | `transaction_id` | Precisely identifies one record |
-| Foreign key (FK) | References a PK in another table | `financial_transactions.period_id` | Prevents invalid relationships |
-| Natural/business key | Stable identifier meaningful outside the database | `EU`, `2026-01`, `SUP-ALPINE` | Connects CSV data to business records |
-| Surrogate key | Internal identifier allocated by the database | `business_unit_id BIGINT` | Efficient, stable internal referencing |
-| Composite business key | Two or more fields jointly identify a record | `(business_unit_id, source_reference)` | Prevents duplicate source transactions per unit |
-| Referential integrity | Every non-null FK points to a valid parent row | A transaction's `period_id` must exist | Preserves trustworthy joins |
-| Normalization | Separate shared facts into related tables | Store a supplier name once in `suppliers` | Reduces repetition and contradictory updates |
+The current database contains a small controlled fixture, not production finance data. It does not implement a double-entry general ledger, period-close enforcement, financial approvals, adjustment workflows, foreign-exchange conversion, audit history, or source-system change data capture.
 
-**Worked example: natural key to surrogate key.** A CSV row contains `business_unit_code = EU`. PostgreSQL might assign Europe `business_unit_id = 7`. The importer looks up `EU`, receives `7`, and inserts `7` as the transaction's FK. It does **not** assume Europe must have ID `1`. Database sequences can have gaps, including after rolled-back work.
+## 3. Relational Model and Normalization
 
-**Why normalize?** Imagine storing the supplier's name on 100 transactions. A name correction would require updating 100 rows, and partial updates could leave conflicting names. Keeping the supplier in one table avoids that inconsistency. The trade-off is that reports require `JOIN` operations to combine tables.
+### 3.1 Six-table schema
 
-### 2.2 Our six-table model
+I implemented the V001 migration with six tables:
 
-| Table | Purpose | Example business identifier |
+| Table | Database responsibility | Key relationships |
 |---|---|---|
-| `business_units` | Organizes ownership and base currency | `EU` |
-| `financial_periods` | Defines each reporting month's dates, quarter, and close state | `2026-01` in the CSV |
-| `cost_categories` | Names and classifies operating expenses | `LOGISTICS` |
-| `suppliers` | Lists counterparties | `SUP-ALPINE` |
-| `financial_transactions` | Stores revenue/expense facts by unit and period | `source_reference` scoped by unit |
-| `contracts` | Links agreement metadata to suppliers and business units | `contract_number` |
+| `business_units` | Defines organizational ownership, region, and base currency | Parent of transactions and contracts |
+| `financial_periods` | Defines canonical calendar months and derived quarters | Parent of transactions |
+| `cost_categories` | Classifies expenses for operating-cost analysis | Optional transaction parent; required for expenses by rule |
+| `suppliers` | Identifies counterparties | Optional transaction parent and required contract parent |
+| `financial_transactions` | Stores positive revenue and expense facts | Required business unit and period; optional supplier; conditional category |
+| `contracts` | Stores supplier agreement metadata | Required supplier and business unit |
 
 ```mermaid
 erDiagram
@@ -62,113 +71,74 @@ erDiagram
     suppliers ||--o{ contracts : signs
 ```
 
-A financial transaction **must** belong to a business unit and accounting period. Revenue has no expense category; expenses require one. Supplier references can be null where no supplier relationship exists. Contract rows presently represent **metadata**, not analyzed contract text.
+I selected `BIGINT GENERATED ALWAYS AS IDENTITY` surrogate primary keys for internal relationships. External datasets use stable natural keys such as `EU`, `LOGISTICS`, supplier codes, year-month period keys, contract numbers, and transaction source references. The importer resolves these values to database identities rather than assuming sequence values.
 
-**Takeaway:** Natural keys connect external systems; surrogate keys connect internal tables. Keys and relationships protect the meaning of our data.
+Normalization keeps business-unit, period, category, and supplier attributes in their own tables. This avoids repeating names and classifications on each transaction and reduces contradictory updates. The trade-off is that reporting and investigation queries require joins.
 
-## 3. Accurate money calculations and financial meaning
+The composite unique constraint on `(business_unit_id, source_reference)` reflects the source system's transaction identity within an owning business unit. It supports traceability and idempotent import decisions without asserting that one source reference is globally unique.
 
-### 3.1 Why Python `Decimal` and PostgreSQL `NUMERIC(18,2)`?
+### 3.2 Monetary and currency representation
 
-A binary floating-point type such as Python `float` cannot represent every decimal fraction exactly. For example, monetary additions involving `0.1` and `0.2` can produce tiny representation differences. These are unacceptable as a default foundation for reconciled finance calculations.
+I selected PostgreSQL `NUMERIC(18,2)` for transaction amounts and Python `Decimal` for generation and ingestion. Binary floating-point values are not used for money. The generator and importer preserve two fractional digits, and the schema requires each stored transaction amount to be greater than zero.
 
-Our design uses **`Decimal`** in Python and **`NUMERIC(18,2)`** in PostgreSQL. `NUMERIC(18,2)` has up to 18 total digits with two decimal places. We also validate imported monetary values to two decimal places rather than silently accepting arbitrary precision.
+Revenue and expense direction is represented by `transaction_type`; amounts remain positive magnitudes. This simplifies the initial analytical fixture but is not a substitute for debit/credit accounting. Each transaction carries an explicit three-letter uppercase currency code. Reports must remain segregated by currency unless a governed exchange-rate policy is introduced.
 
-```python
-from decimal import Decimal
+### 3.3 Calendar periods
 
-revenue = Decimal("100000000.00")
-expenses = Decimal("86000000.00")
+The model uses one row per calendar month. Constraints enforce:
 
-profit = revenue - expenses
-margin_percent = profit / revenue * Decimal("100")
+- Positive financial year.
+- Month values from 1 through 12.
+- Quarter values from 1 through 4.
+- Quarter derived consistently from the month.
+- Period start on the first calendar day of the month.
+- Period end on the last calendar day of the month.
+- One period per financial year and month.
 
-print(profit)          # 14000000.00
-print(margin_percent)  # 14.00
-```
+FY2026 follows the calendar year. Quarter is stored for reporting convenience but constrained against month to prevent divergent dimensions.
 
-Amounts are stored as **positive magnitudes**; `transaction_type` determines whether each is revenue or expense. Financial analysis filters to `posting_status = 'POSTED'`. This is a simplified analytical model, **not** a complete double-entry general ledger or an implemented reversal/approval workflow.
+**Design trade-off:** Storing a derivable quarter makes common reporting simpler while adding a value that must be protected by a constraint. A future fiscal calendar that differs from the calendar year would require an approved schema evolution rather than bypassing the current rule.
 
-### 3.2 Allocating a target amount without losing cents
+## 4. Integrity Controls, Triggers, and Locking
 
-Our generator distributes a known quarterly amount into monthly amounts, then into individual transactions. Rounding each portion independently can make the pieces add up to slightly more or less than the original.
+### 4.1 Declarative constraints
 
-For illustration, splitting €100.00 equally among three records yields €33.33 + €33.33 + €33.34, **not** €33.33 × 3 = €99.99. Our generator uses integer-based random weights, rounds intermediate allocations to cents, and assigns any remainder to the final entry. It preserves the exact approved total.
+I implemented database constraints for invariants that can be evaluated on a row or relationship:
 
-A fixed random seed makes the generated dataset reproducible: rerunning it with the same seed produces the same synthetic records. This is valuable for debugging and repeatable tests; it does not make the data representative of a live ERP system.
+| Control | Implemented rule |
+|---|---|
+| `NOT NULL` | Required ownership, period, dates, types, amounts, statuses, and identifiers |
+| `UNIQUE` | Business-unit, category, supplier, contract, period, and source business keys |
+| `CHECK` | Nonblank identifiers, valid currencies, period boundaries, quarter mapping, positive amounts, allowed states, and contract date validity |
+| Foreign keys | Transaction and contract references must identify existing parent rows |
 
-### 3.3 Financial formulas and the approved scenario
+Financial transactions allow only `REVENUE` and `EXPENSE`. Expenses require a cost category; revenue must not have one. Posting status is restricted to `DRAFT`, `POSTED`, or `REVERSED`. Contract visibility is restricted to `INTERNAL`, `CONFIDENTIAL`, or `RESTRICTED`, and a contract cannot end before it starts.
 
-**Operating profit** = Revenue − Operating expenses
-**Operating margin (%)** = Operating profit ÷ Revenue × 100
+Database integrity does not prove business correctness. A valid positive expense may still be assigned to the wrong supplier, category, business unit, or source reference. Constraints establish structural invariants; reconciliation, source governance, approvals, and audit evidence are separate controls.
 
-| Measure | Q1 2026 | Q2 2026 | Change |
-|---|---:|---:|---:|
-| Revenue | €100.0M | €100.0M | €0.0M |
-| Logistics expense | €10.0M | €12.5M | +€2.5M |
-| Raw-material expense | €35.0M | €36.5M | +€1.5M |
-| Other operating expense | €37.0M | €37.0M | €0.0M |
-| **Total expenses** | **€82.0M** | **€86.0M** | **+€4.0M** |
-| **Operating profit** | **€18.0M** | **€14.0M** | **−€4.0M** |
-| **Operating margin** | **18%** | **14%** | **−4 percentage points** |
+### 4.2 Cross-table posting-period triggers
 
-Because revenue is constant at €100M, the €2.5M logistics increase explains **2.5 percentage points** of the margin decline, and raw materials explain **1.5 percentage points**. These are contributions to the observed *variance*, not proof of why those costs rose. A 4-percentage-point decline is not the same statement as a 4% relative decline.
+A row-level `CHECK` constraint cannot read the referenced `financial_periods` row, so I implemented two complementary trigger functions:
 
-Never combine EUR, INR, and USD amounts into a single monetary sum without an explicitly approved exchange-rate rule.
+1. Before a transaction insert or a posting-date/period update, `validate_transaction_posting_period()` reads the referenced period and rejects a posting date outside its range.
+2. Before a period boundary or date-dimension update, `validate_period_transaction_dates()` rejects a change that would exclude an existing transaction.
 
-**Takeaway:** Exact money types and reconciled formulas establish *what changed*. Contracts and operational evidence are still needed to prove *why*.
+The transaction-side trigger selects the period `FOR SHARE`. In PostgreSQL 17, this row lock blocks conflicting updates and deletes of that period while the transaction is active; ordinary reads remain possible. PostgreSQL documents the detailed row-lock conflicts in its [explicit-locking reference](https://www.postgresql.org/docs/17/explicit-locking.html).
 
-## 4. Database integrity: constraints, foreign keys, and triggers
+This lock addresses the specific race between validating a transaction and changing its referenced period. It does not prove that every concurrent write pattern is safe. The concurrency behavior of these triggers has not been load-tested.
 
-Application validation makes errors easier to understand, but an application can have bugs or be bypassed by another writer. The database must enforce important invariants for every writer.
+### 4.3 Essential indexes
 
-An **invariant** is a rule that must always hold. For example, a transaction's posting date must fall within its referenced financial period.
+I added indexes on foreign-key columns used for investigation joins and parent-row checks:
 
-| Mechanism | What it checks | Example |
-|---|---|---|
-| `NOT NULL` | Required column has a value | `posting_date` cannot be missing |
-| `UNIQUE` | Business identifier cannot be duplicated | Unit + source reference |
-| `CHECK` | A condition on the current row | `amount > 0`; valid transaction type |
-| `FOREIGN KEY` | Referenced parent exists | `period_id` points to `financial_periods` |
-| Trigger | Custom logic executed on changes | Reject posting date outside referenced period |
+- Transaction period, category, and supplier.
+- Contract supplier and business unit.
 
-**Why a trigger for posting dates?** A `CHECK` constraint on `financial_transactions` cannot normally query another table to read `financial_periods.period_start` and `period_end`. We use two complementary triggers:
+Primary-key and unique constraints create their required indexes. I avoided adding speculative reporting indexes to a 216-row fact table. Index additions should follow measured query patterns, data distribution, and production-scale evidence.
 
-1. On inserting/updating a financial transaction, look up the referenced period and reject a date outside its boundaries.
-2. On changing a period's boundaries, reject changes that would invalidate transactions already assigned to it.
+## 5. Synthetic Data and Financial Scenario
 
-The transaction-side trigger uses a row lock (`FOR SHARE`) to coordinate with concurrent period edits. This addresses a particular race; it does **not** establish that all possible concurrent workflows have been tested.
-
-**Other rules not yet implemented:** authenticated access policies, enforcement of closed periods, approval workflows, reversal accounting, and audit history.
-
-**Takeaway:** Use straightforward constraints for rules on a single row, FKs for relationships, and carefully tested triggers when the rule truly crosses tables.
-
-## 5. Transactions and ACID
-
-A **transaction** groups database statements into one logical unit. `COMMIT` makes its changes permanent; `ROLLBACK` reverses its uncommitted changes.
-
-For a six-table import, inserting some reference records but failing to insert dependent transactions would create a misleading partial dataset. Therefore the importer wraps the complete load in **one PostgreSQL transaction**.
-
-### The four ACID properties
-
-| Property | Explanation | FIN-AI consequence |
-|---|---|---|
-| **Atomicity** | All operations in the transaction succeed together, or none is committed | Invalid transaction row rolls back earlier inserts from the same import |
-| **Consistency** | Valid database rules remain satisfied as transactions commit | FKs, `CHECK` rules, and triggers reject invalid final states |
-| **Isolation** | Concurrent transactions have controlled visibility and interaction | One import should not expose an intermediate, uncommitted partial load |
-| **Durability** | Committed changes survive according to PostgreSQL's persistence guarantees | Successful committed finance facts remain stored |
-
-**Isolation requires nuance.** ACID does not mean all concurrent transactions behave as if they ran serially under every setting. PostgreSQL offers isolation levels such as `READ COMMITTED`, `REPEATABLE READ`, and `SERIALIZABLE`, with different behavior and costs. We have not claimed or tested serializable isolation for the importer.
-
-**Example:** Suppose the importer has inserted three new business units and then encounters an invalid financial amount. The database error aborts the transaction; no business units or other imported rows from that attempt should remain. Our database tests verified this rollback behavior for isolated test records.
-
-**Important boundary:** A PostgreSQL transaction protects PostgreSQL changes. It does not automatically roll back a future S3 object upload, message sent to a queue, or update to SAP. Cross-system workflows will need separate recovery and idempotency strategies.
-
-**Takeaway:** Choose a transaction boundary that matches the business consistency requirement, not merely the convenience of processing one file at a time.
-
-## 6. Synthetic data as a controlled engineering fixture
-
-The generator creates fictional Meridian Global Manufacturing records:
+I implemented a deterministic generator for six CSV datasets:
 
 | Dataset | Records |
 |---|---:|
@@ -180,99 +150,233 @@ The generator creates fictional Meridian Global Manufacturing records:
 | Contract metadata | 4 |
 | **Total** | **240** |
 
-The 216 transactions span six months and three business units. Source references are reproducible; categories and suppliers reflect plausible manufacturing expenses; quarterly totals match our predetermined targets.
+A fixed seed makes repeated generation reproducible. Stable business identifiers connect the files without depending on database-generated numeric IDs. Quarterly targets are allocated to monthly and transaction-level records with `Decimal`; rounded components are reconciled so their sum exactly matches the approved target.
 
-**Why use synthetic data?** It supports repeatable validation and safe GitHub publication without real corporate financial data. **What it does not prove:** real supplier causality, real-world distribution patterns, scale, or authorization of sensitive data.
+The European scenario is:
 
-**Takeaway:** Synthetic fixtures are excellent for correctness tests, but cannot substitute for representative performance and security testing.
+| Measure | Q1 2026 | Q2 2026 | Change |
+|---|---:|---:|---:|
+| Revenue | EUR 100.0M | EUR 100.0M | EUR 0.0M |
+| Logistics expense | EUR 10.0M | EUR 12.5M | +EUR 2.5M |
+| Raw-material expense | EUR 35.0M | EUR 36.5M | +EUR 1.5M |
+| Other operating expense | EUR 37.0M | EUR 37.0M | EUR 0.0M |
+| **Total expenses** | **EUR 82.0M** | **EUR 86.0M** | **+EUR 4.0M** |
+| **Operating profit** | **EUR 18.0M** | **EUR 14.0M** | **-EUR 4.0M** |
+| **Operating margin** | **18%** | **14%** | **-4 percentage points** |
 
-## 7. ETL: from CSV to a relational database
+The logistics and raw-material movements reconcile the expense variance. They identify financial cost drivers, not operational root causes. Synthetic supplier and contract metadata do not prove why a cost changed.
 
-**ETL** stands for **Extract → Transform → Load**. An ingestion pipeline takes source records, validates and converts them, resolves relationships, and persists the result.
+## 6. Ingestion, Natural Keys, and Idempotency
 
-Our flow:
+### 6.1 Source validation and key resolution
 
-```mermaid
-flowchart LR
-    A[Six synthetic CSV files] --> B[Validate headers and parse values]
-    B --> C[Resolve business keys to database IDs]
-    C --> D[Import reference tables first]
-    D --> E[Import transactions and contracts]
-    E --> F{All records valid?}
-    F -->|Yes| G[Commit transaction]
-    F -->|No| H[Rollback transaction]
+The importer reads all six CSV files before opening the database transaction. It validates headers and converts booleans, integers, ISO dates, nullable references, and exact two-decimal amounts. Invalid source shape or types fail before database work begins.
+
+Records are inserted in dependency order:
+
+```text
+business_units
+financial_periods
+cost_categories
+suppliers
+    -> financial_transactions
+    -> contracts
 ```
 
-### 7.1 Extract and validate
+For each child record, the importer resolves a source natural key to the corresponding PostgreSQL `BIGINT` identity. Missing reference keys raise a validation error rather than creating an orphan or guessing an identity.
 
-The importer checks that each CSV has its expected headers before connecting to PostgreSQL. It parses ISO dates, booleans, integer fields, and monetary `Decimal` values. An empty optional supplier/category reference becomes Python `None`, which Psycopg passes as SQL `NULL`.
+All SQL values are passed through Psycopg parameters. Credentials come from environment variables and are not printed. A production secret manager and least-privilege database identity remain future work.
 
-**Why validate early?** We can reject malformed files with a clear error instead of discovering a failure halfway through an import.
+### 6.2 Idempotency and conflict detection
 
-### 7.2 Resolve natural keys to foreign keys
+For every natural key, the importer follows one of three paths:
 
-The CSV knows `EU` and `2026-01`; the target schema references numeric identities. The importer loads/looks up parent records and maintains maps from these business keys to the database's assigned IDs.
-
-**Dependency order:** `business_units`, `financial_periods`, `cost_categories`, `suppliers` → `financial_transactions`, `contracts`.
-
-### 7.3 Parameterized SQL
-
-SQL text and parameter values are passed separately through Psycopg. For example:
-
-```python
-cursor.execute(
-    "SELECT business_unit_id FROM public.business_units WHERE business_unit_code = %s",
-    (business_unit_code,)
-)
-```
-
-The `%s` placeholder is handled by the database driver. Do **not** concatenate untrusted values into SQL text. Credentials are read from environment variables; production-grade secret storage and least-privilege identities are future work.
-
-### 7.4 Idempotency: safe repeat runs
-
-**Idempotent** means that repeating the same operation has no additional intended business effect. It matters when a job is retried after a timeout or an operator reruns it without knowing whether the first attempt completed.
-
-| Existing natural key? | Existing values match? | Importer's action |
+| Existing row | Business values match | Action |
 |---|---|---|
-| No | Not applicable | Insert record |
-| Yes | Yes | Reuse existing row; no new insert |
+| No | Not applicable | Insert |
+| Yes | Yes | Reuse and count as existing |
 | Yes | No | Raise `ImportConflictError` and roll back |
 
-Our reimport of all six unchanged CSVs resulted in **0 inserted records and 240 recognized existing records**. This establishes safe *sequential* reruns for this dataset. It does not implement versioned updates, financial reversals, or safe concurrent writes by every possible writer.
+I chose explicit comparison over `ON CONFLICT DO NOTHING`. Silent conflict handling could conceal a changed amount or classification under an existing source reference. Exact-match reuse supports safe sequential retries while rejecting unapproved overwrites.
 
-**Why not just `ON CONFLICT DO NOTHING`?** Silently skipping an existing key could hide a changed amount for the same source transaction. Exact-value comparison exposes disagreement instead of concealing it.
+The importer takes a transaction-scoped PostgreSQL advisory lock before loading. Cooperating importer processes using the same lock identifier are serialized until transaction completion. Advisory locks are cooperative; another writer can ignore them. Unique constraints and other database controls therefore remain necessary. Concurrent importer execution has not been independently tested.
 
-### 7.5 Advisory lock: coordinating multiple importer processes
+**Implemented evidence:** Reimporting the unchanged dataset inserted zero new records and recognized all 240 existing records. Importer integration tests also verified that deliberately invalid input leaves no isolated test records in any of the six tables.
 
-A **transaction-scoped advisory lock** is an application-defined PostgreSQL lock. Our importer requests the same lock ID before loading records. Cooperating importers using that ID wait rather than executing simultaneously; PostgreSQL releases the lock at transaction end.
+## 7. ACID, WAL, and Recovery Boundaries
 
-This reduces concurrent importer races but has limits: another application that ignores the lock can still write to those tables. Unique constraints remain necessary as the database's duplicate-key safeguard. **Concurrent importer execution has not been independently tested yet.**
+### 7.1 Actual transaction boundary
 
-**Trade-off:** Row-by-row lookups make decisions explicit and understandable for our small dataset. Larger workloads may benefit from staging tables, bulk loading, or batching after measuring throughput and failure-recovery requirements.
+I implemented the six-table import inside one Psycopg `connection.transaction()` context. The transaction begins before the advisory lock and table-import loops and ends after all six datasets have been processed. An exception exits the context without commit and rolls back all writes from that attempt.
 
-**Takeaway:** A trustworthy loader checks data before writing, resolves identities correctly, commits atomically, rejects conflicting business keys, and supports safe retries.
-
-## 8. SQL reporting: how to independently reconcile finances
-
-A successful importer log reports that a program completed. **Reconciliation** checks whether persisted database records reproduce expected financial facts, independently of that program's messages.
-
-### 8.1 The SQL operations, explained
-
-| SQL construct | Meaning | Why our query needs it |
+| ACID property | PostgreSQL meaning | FIN-AI implementation |
 |---|---|---|
-| `SELECT` | Choose columns or expressions to return | Display quarter, revenue, expenses, and margin |
-| `FROM` | Identify the source relation | Start with transaction facts |
-| `JOIN ... ON` | Match rows from related tables | Add business-unit and financial-period context |
-| `WHERE` | Filter rows before grouping | Restrict to EU, EUR, 2026, and posted entries |
-| `CASE WHEN` | Conditional value selection | Separate revenue amounts from expenses |
-| `SUM` | Add numeric values | Calculate quarter totals |
-| `GROUP BY` | Define the report's level of detail, or *grain* | Produce one result per quarter/currency |
-| `NULLIF(x, 0)` | Return null when denominator is zero | Avoid divide-by-zero errors |
-| `ORDER BY` | Sort final output | Q1 before Q2 |
+| Atomicity | A transaction commits as one unit or its changes are rolled back | All six imports succeed together; a record failure aborts the attempt |
+| Consistency | A committed state satisfies declared database invariants | Constraints, FKs, and triggers reject invalid states |
+| Isolation | Concurrent transactions observe changes according to the selected isolation level | PostgreSQL controls visibility; the importer additionally uses an advisory lock |
+| Durability | A successful commit is persisted under PostgreSQL's configured durability guarantees | Committed records rely on PostgreSQL storage and WAL behavior |
 
-**What is report grain?** It is what one output row represents. Our grain is **one quarter for Europe, in EUR**. Accidentally grouping different business units or currencies together can produce mathematically valid but financially meaningless results.
+ACID consistency means preserving database invariants across a transaction. It does not mean that the data is economically correct, that a report is reconciled, or that distributed replicas are linearizable. Those are separate correctness and consistency questions.
 
-### 8.2 Query used to verify operating margin
+### 7.2 WAL and crash recovery
+
+PostgreSQL uses Write-Ahead Logging (WAL): it records changes in WAL before the corresponding data pages need to be written. After a crash, PostgreSQL can replay WAL records to redo committed changes not yet reflected in data files. WAL also supports physical backup, point-in-time recovery, and replication mechanisms when configured. These mechanisms are described in the PostgreSQL 17 [WAL documentation](https://www.postgresql.org/docs/17/wal-intro.html).
+
+The project uses PostgreSQL's standard transaction behavior, but I have not validated crash recovery, WAL archiving, point-in-time recovery, backup restoration, synchronous commit configuration, storage durability, or replica recovery. The Docker development database is not evidence of a production recovery design.
+
+### 7.3 Implemented and untested behavior
+
+I validated rollback for an invalid isolated import and idempotent sequential reimport. I have not tested:
+
+- A process or host crash during an import.
+- Network loss before or after commit acknowledgement.
+- Deadlocks or serialization failures under concurrent imports.
+- Connection-pool retry behavior.
+- Backup restoration or WAL replay.
+- Recovery point or recovery time objectives.
+
+A client that loses its connection around commit can face an unknown outcome: the server may have committed even if the client did not receive confirmation. Natural-key idempotency makes a retry safer, but operational handling must still distinguish an exact existing record from a conflict.
+
+**Takeaway:** The implemented transaction protects the six-table PostgreSQL write set. WAL underpins PostgreSQL durability, while crash and recovery claims require separate operational testing.
+
+## 8. MVCC and PostgreSQL 17 Isolation
+
+### 8.1 MVCC and snapshots
+
+PostgreSQL uses Multi-Version Concurrency Control (MVCC). Updates create row versions, and a query reads versions visible to its snapshot rather than reading uncommitted changes in place. This generally allows readers and writers to proceed without blocking each other. The PostgreSQL 17 [MVCC introduction](https://www.postgresql.org/docs/17/mvcc-intro.html) defines this snapshot-based visibility model; explicit locks remain available where MVCC alone does not protect an application invariant.
+
+Visibility is determined by transaction state and the active isolation level. A snapshot is not necessarily “the latest database” by the time a long query completes. It is a consistent visibility boundary established for a statement or transaction.
+
+### 8.2 Isolation levels and anomalies
+
+PostgreSQL 17 supports the four SQL isolation-level names but implements three distinct behaviors. `READ UNCOMMITTED` behaves as `READ COMMITTED`. PostgreSQL's `REPEATABLE READ` is snapshot isolation and prevents phantom reads, which is stronger than the SQL standard's minimum requirement. `SERIALIZABLE` adds Serializable Snapshot Isolation conflict detection. These behaviors are documented in the PostgreSQL 17 [transaction-isolation reference](https://www.postgresql.org/docs/17/transaction-iso.html).
+
+| Requested level | PostgreSQL 17 behavior | Finance reporting implication |
+|---|---|---|
+| Read Uncommitted | Same as Read Committed; dirty reads do not occur | No access to another transaction's uncommitted postings |
+| Read Committed | New snapshot for each statement; PostgreSQL default | One aggregate statement is internally snapshot-consistent, but later statements may see new commits |
+| Repeatable Read | Stable transaction snapshot; no dirty, non-repeatable, or phantom reads | Multi-query report can retain one view, but serialization anomalies remain possible for write workflows |
+| Serializable | Stable snapshot plus detection of unsafe read/write dependency patterns | Committed results behave like some serial order; transactions may abort and require full retry |
+
+The relevant anomaly terms are:
+
+| Phenomenon | Meaning |
+|---|---|
+| Dirty read | Reading data written by a transaction that has not committed |
+| Non-repeatable read | Re-reading a row and observing a later committed version |
+| Phantom read | Re-running a predicate query and observing a changed qualifying row set |
+| Lost update | One writer overwrites another writer's change without preserving it |
+| Write skew | Concurrent transactions read a shared condition and make disjoint writes that jointly violate an invariant |
+| Serialization anomaly | The committed outcome cannot be explained by any one-at-a-time ordering |
+
+PostgreSQL constraints and row locks prevent some conflicts, but they do not automatically eliminate every lost-update or write-skew pattern. Correct protection depends on the statement form, isolation level, predicate, and invariant. Serializable transactions can reject unsafe executions with SQLSTATE `40001`; the application must retry the entire transaction from the beginning. Serializable behavior and retry handling have not been tested in FIN-AI.
+
+Serializable transaction isolation is a database guarantee about the outcome of successfully committed concurrent transactions: it must match some serial ordering. It is not strict serializability, which additionally preserves real-time ordering of non-overlapping operations, and it is not linearizability, the single-operation real-time consistency property used in CAP terminology. PostgreSQL `SERIALIZABLE` isolation must not be represented as a CAP linearizability guarantee.
+
+### 8.3 Finance report while new transactions are posted
+
+Consider a quarterly report that obtains revenue and expenses while another transaction posts a new expense.
+
+A single SQL statement that joins and aggregates both revenue and expenses sees one statement snapshot under Read Committed. The new expense is either visible to the whole statement or not visible to it, depending on whether it committed before the statement snapshot. The statement does not combine partially visible committed states.
+
+A multi-statement report is different. Under Read Committed, a revenue query can use one snapshot and a later expense query can use another. If the new expense commits between those statements, the report may combine revenue from the earlier view with expenses from the later view. That result is not a dirty read, but it may not represent one consistent reporting instant.
+
+A Repeatable Read transaction gives all report statements the same snapshot established at the first non-transaction-control statement. It provides a stable view while new postings continue, but the result may be stale by completion. For long-running reports, snapshot age, vacuum impact, business freshness requirements, and transaction duration must be considered.
+
+A future reporting repository should prefer one aggregate statement where practical. If a report requires multiple dependent queries, its transaction isolation and retry strategy must be selected explicitly. No multi-statement concurrency test has been executed.
+
+### 8.4 Locking considerations
+
+PostgreSQL automatically takes table and row locks for many operations. Ordinary `SELECT` statements generally do not block data-changing statements under MVCC; row locks such as `FOR SHARE` or `FOR UPDATE` coordinate specific conflicts. Locks are normally held until transaction end. Deadlocks can still occur, and PostgreSQL resolves a detected deadlock by aborting one participant.
+
+The importer's advisory lock has application-defined meaning and only coordinates participants that use it. The posting-period trigger's `FOR SHARE` lock is tied to the selected period row and prevents conflicting modification during validation. Neither mechanism replaces an explicit isolation and retry design for future concurrent workloads.
+
+## 9. CAP and Deployment Topology
+
+CAP concerns a distributed data system when a network partition prevents nodes from communicating:
+
+- **Consistency** means a linearizable view: operations appear to occur atomically in one real-time order.
+- **Availability** means every request to a non-failing node receives a non-error response, without waiting indefinitely.
+- **Partition tolerance** means the system continues operating despite lost or delayed communication between nodes.
+
+“Pick any two of three” is misleading as a general architecture rule. Partition tolerance means the design accounts for communication failure; it does not guarantee that requests remain available during a partition. In a real distributed deployment, network partitions must be anticipated. During a partition, a design may reject or delay operations to preserve strong or linearizable consistency, or accept operations that may temporarily diverge to preserve availability. Outside a partition, latency, durability, and consistency still involve separate choices.
+
+The current FIN-AI PostgreSQL instance is a single Docker development node. CAP does not describe normal behavior within that one database process, although node failure makes the service unavailable. CAP becomes directly relevant if PostgreSQL replicas, multi-region writers, document stores, search indexes, or other distributed services are introduced.
+
+Future high-availability design must decide:
+
+- Whether financial writes require one authoritative primary.
+- Whether reads may use replicas and tolerate lag.
+- Whether a region can accept writes while disconnected.
+- How failover avoids split-brain or stale-primary writes.
+- Which recovery point, recovery time, and data-loss objectives apply.
+- Whether contract evidence and search results must align with the same financial-data version.
+
+No partition, failover, cross-region, or CAP behavior has been tested.
+
+## 10. Distributed Consistency and Replication
+
+Distributed consistency is different from both ACID consistency and transaction isolation:
+
+| Concept | Question answered |
+|---|---|
+| ACID consistency | Does a committed local transaction preserve declared database invariants? |
+| Transaction isolation | What concurrent changes can a transaction observe, and which anomalies are possible? |
+| CAP/replica consistency | What ordering and freshness guarantees do distributed clients observe, especially during delay or partition? |
+
+Potential distributed guarantees include:
+
+| Guarantee | Meaning | Possible FIN-AI use |
+|---|---|---|
+| Strong/linearizable consistency | Reads reflect a single real-time order of completed writes | Authoritative financial posting and governed totals |
+| Eventual consistency | Replicas converge if new updates stop | Search indexes or derived evidence views where bounded staleness is acceptable |
+| Causal consistency | Causally related operations are observed in order | Evidence publication should not precede the metadata/version it depends on |
+| Read-your-writes | A client can observe its own accepted write | An operator confirms a newly imported batch |
+| Monotonic reads | A client does not move backward to an older observed state | Investigation sessions should not alternate between newer and older evidence versions |
+
+A future PostgreSQL read replica can return stale results because WAL replay lags the primary. A document store may contain a newer contract version than its search index. An evidence retrieval result may cite a document version that does not align with the financial transaction snapshot being analyzed.
+
+Cross-service answers therefore need source/version alignment. Candidate controls include committed batch identifiers, source timestamps, contract document versions, PostgreSQL transaction or snapshot metadata where appropriate, and explicit freshness policies. A response should identify which financial period, posting cutoff, currency, and evidence versions it used.
+
+No replication topology, lag budget, causal guarantee, session guarantee, or cross-service version protocol is implemented or validated.
+
+## 11. Distributed Transactions and Recovery Patterns
+
+The importer's local PostgreSQL transaction cannot atomically control a future object-store upload, search-index update, message publication, or source-system acknowledgement. Extending one database transaction across independent services would introduce coordination, availability, and operational complexity.
+
+The following are future design alternatives:
+
+### 11.1 Transactional outbox
+
+A service can commit a business change and an outbox event in the same PostgreSQL transaction. A separate publisher reads unpublished outbox records and sends them to a broker. This avoids the “database committed but event not sent” gap, but delivery is normally at least once rather than exactly once.
+
+Consumers must deduplicate events using stable event or business identifiers. Publication state, retention, ordering scope, poison-message handling, and replay operations require explicit design. No outbox table or publisher exists today.
+
+### 11.2 At-least-once delivery and idempotency
+
+Retries are unavoidable when acknowledgements can be lost. At-least-once delivery means a consumer may receive the same event more than once. Idempotent consumers must recognize duplicates and either reuse the prior effect or reject a conflicting payload.
+
+The existing importer's natural-key comparison demonstrates local idempotency for sequential CSV retries. It is not a general distributed-event deduplication implementation.
+
+### 11.3 Saga and compensation
+
+A saga coordinates a multi-service business process as local transactions with subsequent steps. When a later step fails, compensating actions attempt to reverse or neutralize earlier effects. Compensation is business logic, not database rollback: an issued financial adjustment may require another auditable transaction rather than deletion.
+
+Sagas may use orchestration or choreography. They require durable state, idempotent steps, timeouts, retry policies, and explicit handling when compensation itself fails. No saga is implemented.
+
+### 11.4 Failure recovery, retries, and timeouts
+
+Future cross-system operations need bounded timeouts, exponential backoff with jitter where appropriate, retry classification, dead-letter or quarantine handling, and operational reconciliation. Retrying permanent validation errors is harmful; retrying transient dependency failures may be correct. An unknown commit outcome requires an idempotent status check before replay.
+
+Two-phase commit could coordinate some resource managers, but it increases coupling and can reduce availability when a coordinator or participant is unavailable. It is not currently selected or implemented.
+
+**Takeaway:** Local ACID protects PostgreSQL state. Cross-system correctness requires durable messaging, idempotency, version alignment, and recovery workflows chosen for each business process.
+
+## 12. SQL Reconciliation and Financial Meaning
+
+Successful execution of a generator or importer does not prove that persisted data reproduces approved financial totals. I independently reconciled the PostgreSQL records using SQL aggregation at the business-unit, period, posting-status, and currency grain.
+
+The following query reproduces the documented reconciliation logic. The original historically executed query text is not preserved in the repository, so I do not represent this query as the exact statement used to produce the recorded results:
 
 ```sql
 SELECT
@@ -307,70 +411,43 @@ GROUP BY fp.quarter, bu.base_currency
 ORDER BY fp.quarter;
 ```
 
-**Reading the query:** It joins transactions to their owner and period; filters to approved posted European EUR records; sums revenue and expenses separately; computes margin; and returns one row per quarter. The explicit currency filter avoids accidentally accepting incorrectly coded data.
+The explicit business-unit, year, posting-status, and currency predicates prevent unintended aggregation across ownership or currencies. `NULLIF` avoids division by zero. The result verified EUR 100M revenue and EUR 82M expenses in Q1 for an 18% margin, then EUR 100M revenue and EUR 86M expenses in Q2 for a 14% margin.
 
-**Verified outputs:** Q1 revenue €100M, expenses €82M, margin **18%**. Q2 revenue €100M, expenses €86M, margin **14%**.
+The separate cost-category reconciliation verified:
 
-### 8.3 Cost-driver variance versus root-cause evidence
+- Logistics increased EUR 2.5M.
+- Raw materials increased EUR 1.5M.
+- Other operating costs were unchanged.
+- The category movements sum to the EUR 4M total expense increase.
 
-We separately grouped expense records by cost category and quarter. The database returned:
+These are validated cost drivers. They do not prove supplier, contract, pricing, volume, route, or operational root causes.
 
-| Cost driver | Q1 | Q2 | Increase | Share of €4M increase |
-|---|---:|---:|---:|---:|
-| Logistics | €10.0M | €12.5M | €2.5M | 62.5% |
-| Raw materials | €35.0M | €36.5M | €1.5M | 37.5% |
-| Other operating costs | €37.0M | €37.0M | €0M | 0% |
+The loaded fixture contains 72 transactions for each of EU/EUR, IN/INR, and US/USD, with zero detected currency mismatches. This validates the fixture; the schema does not currently enforce transaction currency equals business-unit base currency.
 
-These movements **fully reconcile** the €4M increase in total expenses. They **do not** show whether logistics rose because of rate increases, higher shipment volume, route changes, penalties, or something else. The later AI investigation must seek evidence for such hypotheses.
+## 13. RLS and Authorization Status
 
-**Takeaway:** Validate financial answers by querying stored facts at the correct business-unit, period, status, and currency grain. A cost variance is a lead, not a proven cause.
+The schema includes `business_unit_id` ownership on financial transactions and contracts. This is necessary for future business-unit authorization but does not enforce it.
 
-## 9. Business-unit segregation versus actual security
+PostgreSQL Row-Level Security is not enabled, no policies exist, and no database identity mapping connects authenticated users to allowed business units. The current database therefore must not be described as providing tenant or business-unit isolation.
 
-We checked the persisted facts:
+A future RLS design must address:
 
-| Unit | Base currency | Transactions | Currency mismatches |
-|---|---|---:|---:|
-| EU | EUR | 72 | 0 |
-| IN | INR | 72 | 0 |
-| US | USD | 72 | 0 |
+- Verified identity and entitlements from the authenticated application boundary.
+- Least-privilege database roles.
+- Transaction-local security context that cannot leak through pooled connections.
+- Policies for regional and global roles.
+- Owner, superuser, and `BYPASSRLS` behavior.
+- Fail-closed behavior when security context is absent.
+- Positive and negative access tests.
+- Administrative and maintenance paths that cannot silently bypass intended controls.
 
-This proves that the **loaded fixture's transaction currency matches its owning unit's base currency**. It does **not** prove that the database enforces currency matching for every future writer, or that an India-only user is prevented from reading European finance records.
+Transaction-local context is an input to a policy, not proof of identity. RLS should be defense in depth alongside application authorization and restricted database permissions.
 
-**Segregation** means data is labeled and organized by its owner. **Authorization** means a properly authenticated user is allowed to perform a particular operation on particular records. PostgreSQL **Row-Level Security (RLS)** can apply authorization policies at the row level, but our RLS policies, user identity mapping, and negative-access tests are **not implemented**.
+## 14. Query Planning and Performance Evidence
 
-Later, we must distinguish a regional finance user from a global CFO, verify both allowed and denied access, and address safe propagation of identity through application and agent layers.
+PostgreSQL's planner selects scans, joins, and aggregation strategies from table statistics and estimated costs. `EXPLAIN ANALYZE` executes the query and reports actual measurements; `BUFFERS` describes shared-buffer activity. Planner cost values are relative estimates, not milliseconds.
 
-**Takeaway:** A tenant/business-unit column is a prerequisite for isolation design, not proof that isolation is enforced.
-
-## 10. PostgreSQL query performance: reading an execution plan
-
-A query can be correct yet slow at scale. PostgreSQL's **query planner** evaluates candidate execution strategies using statistics and estimated costs. `EXPLAIN` displays its chosen strategy; `EXPLAIN ANALYZE` **actually runs** the query and reports measurements. `BUFFERS` adds page-access information.
-
-### 10.1 A quick guide to plan terminology
-
-| Term | Meaning | How to interpret it |
-|---|---|---|
-| `Seq Scan` | Read a table broadly, usually page by page | Often sensible for small tables or many matching rows |
-| `Index Scan` | Use an index to locate rows | Useful when few rows match; has random-access costs |
-| `Nested Loop` | For rows from one input, search the other | Good for small inputs or efficient indexed lookups |
-| `Hash Join` | Build a hash structure on one input and match the other | Often good for joining manageable result sets |
-| `Memoize` | Cache results of repeated parameterized lookups | Saves repeated work when keys recur |
-| `Sort` | Arrange rows for ordering or grouping | Uses memory; large sorts may spill to disk |
-| `HashAggregate` | Calculate groups using a hash table | Efficient when groups fit in memory |
-| `GroupAggregate` | Aggregate rows already arranged by group | Often accompanies a sort or ordered scan |
-| `cost=...` | Planner's relative estimated work | **Not milliseconds**, and not directly user latency |
-| `rows=...` | Planner's estimated output rows | Compare with actual to assess estimate quality |
-| `actual time=...` | Measured operator timing in milliseconds | A single run can vary |
-| `loops=...` | Number of times the plan node executed | Multiply carefully when interpreting repeated work |
-| `Buffers: shared hit` | Blocks found in PostgreSQL's shared buffer cache | Hits are not physical disk reads |
-| `Buffers: shared read` | Blocks read into shared buffers | May be served by the OS cache, not necessarily physical disk |
-
-**How to read a plan:** Start with lower/indented scan and join nodes to understand how rows were obtained. Follow them upward through joins, grouping, and sorting. Check estimated versus actual rows, filtering, and any unusually repeated or resource-intensive operations.
-
-### 10.2 Our actual before/after measurement
-
-After the 240-record import, we ran `EXPLAIN (ANALYZE, BUFFERS)` for the European quarterly revenue/expense query. Then we ran PostgreSQL `ANALYZE` on the three relevant tables and repeated the measurement.
+After importing 240 total records, I retained measurements for a European quarterly aggregation before and after running `ANALYZE` on the relevant tables:
 
 | Observed item | Before statistics refresh | After statistics refresh |
 |---|---|---|
@@ -382,68 +459,67 @@ After the 240-record import, we ran `EXPLAIN (ANALYZE, BUFFERS)` for the Europea
 | Shared buffer hits during execution | 150 | 6 |
 | Final result rows | 4 | 4 |
 
-**What happened?** Initially the planner selected repeated lookups, including indexed primary-key access and a `Memoize` cache. After refreshed statistics, it chose hash joins and hash aggregation. Both plans returned the same four grouped results (two quarters × revenue/expense types).
+`ANALYZE` refreshed statistics; it did not change financial data or create indexes. The planner then chose hash joins and hash aggregation instead of nested loops. The estimate improved but still differed from the actual 72-row join output, illustrating that planner estimates can miss correlations between business unit, currency, and other fields.
 
-**Why did estimates differ?** The planner works with estimates and may not fully account for correlations between columns such as business unit and currency. Even after the refresh, one estimate was 24 rows versus 72 actual rows.
+The retained plan table records four final rows, whereas the displayed reconciliation query groups only by quarter and currency and would produce two European quarter rows. The four-row output is consistent with a different aggregation that also grouped by transaction type, but the original `EXPLAIN` statement and plan output are not available. I therefore cannot verify that grouping or claim that the table measures the displayed reconciliation query; it records the historical measurements with incomplete query provenance.
 
-**Do not overclaim:** A 0.157 ms single run is a useful **development baseline**, not evidence of production throughput, sustained latency, or guaranteed performance improvement. Buffer hits and timing also depend on cache state and execution conditions. At 216 fact rows, sequential scanning is reasonable and adding another index is not justified by these results.
+The lower measured execution time is one development observation, not a guaranteed performance gain. Cache state, system load, statistics, plan selection, and data volume affect results. At 216 transaction rows, sequential scans are reasonable. These measurements do not establish production latency, throughput, concurrency capacity, or an indexing requirement.
 
-### 10.3 What exactly does `ANALYZE` do?
+## 15. Design Decisions and Trade-offs
 
-`ANALYZE` collects/revises statistics about table content and distributions that the planner uses to estimate cardinalities and choose join/scan methods. It is not the same as creating an index, and it does not change financial record values. Autovacuum can run automatic analyze operations; manually refreshing after a representative data load is useful for investigation.
-
-**Takeaway:** Tune from evidence. Verify the query's grain and filters, inspect the plan, refresh statistics where warranted, then benchmark with representative data before changing indexes or architecture.
-
-## 11. Validation evidence and claim boundaries
-
-| Validation | Observed result | What it establishes |
+| Decision | Rationale | Limitation or future implication |
 |---|---|---|
-| PostgreSQL 17 V001 migration in Docker | Successful | Schema objects created |
-| Database integrity tests | **27/27 passed** | Tested schema and trigger rules behave as expected |
-| Synthetic generator tests | **11/11 passed** | Tested reproducibility, dates, references, precision, and totals |
-| Importer PostgreSQL integration tests | **4/4 passed** | Tested load, exact-match rerun, conflict rejection, and rollback |
-| Permanent import of six CSVs | **240 records inserted** | Synthetic data committed to the development database |
-| Repeat import | **0 inserted, 240 existing** | No duplicates on this sequential rerun |
-| Independent SQL reconciliation | **18% → 14%**; €4M cost increase | Stored facts match the approved scenario |
-| Business-unit/currency check | **72 per unit; 0 mismatches** | Fixture's owner/currency associations match |
-| `EXPLAIN ANALYZE` baseline | **0.220 ms**, then **0.157 ms** | Measured small-data plan behavior |
+| PostgreSQL 17 as the structured source of record | Relational integrity, exact numeric types, transactions, SQL analytics, and mature recovery mechanisms | HA, backup, replication, and production operations are not designed |
+| Normalized six-table model | Reduces duplication and protects shared reference data | Reporting requires joins; model is not a full ledger |
+| Natural keys plus surrogate identities | Stable source integration with efficient internal FKs | Importer must resolve and compare keys |
+| `NUMERIC(18,2)` and `Decimal` | Exact two-decimal finance representation | Currency-specific scale and advanced accounting may require evolution |
+| Constraints plus two cross-table triggers | Enforces shared rules for every database writer | Trigger concurrency and operational maintenance require care |
+| One transaction for all six datasets | Prevents partial imports | Larger loads may increase transaction duration and lock retention |
+| Exact-match idempotency | Enables safe sequential retries without silent overwrite | Legitimate corrections need a governed version or adjustment path |
+| Transaction-scoped advisory lock | Coordinates cooperating importers | Does not constrain other writers and has not been concurrency-tested |
+| Independent SQL reconciliation | Confirms persisted financial meaning | Depends on approved definitions and correct report grain |
+| Evidence-based indexing | Avoids tuning a tiny synthetic dataset prematurely | Representative workload testing remains necessary |
+| Future distributed patterns kept explicit | Prevents local ACID from being misrepresented as cross-system atomicity | Outbox, saga, replication, and recovery mechanisms remain unimplemented |
 
-**Not yet proven or implemented:** Active RLS and delegated authorization; concurrent-writer safety testing; production-volume performance; auditing, controlled financial corrections and period close; disaster recovery; integration with actual SAP or other enterprise data; document-grounded supplier root causes.
+## 16. Validation Evidence
 
-A test pass is evidence only for its test conditions. We must continue to distinguish **design intentions**, **implemented controls**, and **independently verified behavior**.
-
-## 12. Architecture decisions, trade-offs, and takeaways
-
-| Decision | Reason | Main limitation |
+| Validation scope | Observed result | What it establishes |
 |---|---|---|
-| PostgreSQL as initial structured source | Strong integrity and familiar SQL | Document retrieval and future scaling need other components |
-| Natural keys + `BIGINT` surrogate IDs | Stable source integration and safe internal relations | Must map keys during ingestion |
-| `Decimal` + `NUMERIC(18,2)` | Precise, reconcilable monetary values | Currency-specific precision or complex accounting may require extensions |
-| Constraints and selective triggers | Business rules apply regardless of client | Triggers require careful maintenance and concurrency testing |
-| One import transaction | No partial six-table import | Larger loads may hold locks longer |
-| Exact-match idempotency | Prevent duplicate runs and silent financial overwrites | Authorized updates need a separate, versioned path |
-| Transaction-scoped advisory lock | Coordinates cooperating import processes | Other writers do not honor it automatically |
-| Independent SQL reconciliation | Verifies persisted business meaning | Needs agreed accounting definitions and controlled report grain |
-| Measure before indexing | Prevents premature tuning | Tiny synthetic runs do not predict enterprise performance |
+| PostgreSQL 17 V001 migration in Docker | Successful | Six tables, constraints, triggers, functions, and indexes were created |
+| SQL schema integrity suite | **27 passed** | Tested PK, FK, unique, check, period, trigger, and contract behavior with rollback |
+| Synthetic generator suite | **11 passed** | Tested reproducibility, exact totals, dates, references, currencies, and CSV round trips |
+| Synthetic dataset | **240 records** | 3 units, 6 periods, 3 categories, 8 suppliers, 216 transactions, and 4 contracts generated |
+| Importer integration suite | **4 passed** | Tested six-table load, source counts, exact-match reimport, conflict rejection, and complete rollback |
+| Initial CSV import | **240 records imported** | Controlled synthetic dataset committed to the development database |
+| Sequential reimport | **0 new; 240 existing** | Exact unchanged records did not duplicate |
+| SQL reconciliation | **18% to 14%** | Stored European facts match the approved Q1/Q2 scenario |
+| Unit/currency reconciliation | **72 transactions per unit; 0 fixture mismatches** | The loaded fixture preserves EU/EUR, IN/INR, and US/USD boundaries |
+| Query-plan measurement | **0.220 ms before; 0.157 ms after ANALYZE** | Small-data plan and statistics behavior was observed |
+| Full Python suite | **41 passed, 0 skipped** | Combined Python tests passed; this is not a database-only test count |
 
-### Practice explaining these decisions
+The 27 SQL tests are the database schema integrity evidence. The 4 importer tests exercise PostgreSQL ingestion behavior. The 11 generator tests validate offline data construction. The 41-test Python result spans multiple project components and must not be interpreted as 41 database or API tests.
 
-**Q1. Why put constraints in PostgreSQL when Python already validates inputs?**
-Because another importer, API, or direct database writer might bypass Python validation. Application checks give friendly early errors; database controls provide the shared integrity boundary.
+## 17. Known Limitations and Future Work
 
-**Q2. Why is a successful CSV import not sufficient proof of financial correctness?**
-Because a program can complete while values are missing, duplicated, mislabeled, or incorrectly aggregated. Independent SQL reconciles persisted records against approved totals at the right business-unit and currency grain.
+Implemented behavior is limited to the initial schema, synthetic fixture, importer, and development validation described above. The following remain unresolved design or implementation work:
 
-**Q3. Why does identifying €2.5M more logistics expense not establish the root cause?**
-It quantifies the category movement, but it cannot distinguish contract-rate changes, shipment volume, routing, penalties, or other explanations. Supporting operational and contractual evidence is required.
+- Production backup, restore, WAL archive, and disaster-recovery testing.
+- Explicit reporting isolation policy for single- and multi-statement reports.
+- Serializable retry behavior and concurrent-writer testing.
+- Deadlock, timeout, unknown-commit, and process-crash recovery tests.
+- Enforced period close, corrections, reversals, approvals, and audit history.
+- Currency/base-currency enforcement and governed FX conversion.
+- Active RLS, identity propagation, least-privilege roles, and negative-access testing.
+- PostgreSQL HA, failover, replica-read, lag, and cross-region consistency policies.
+- Cross-service source/version alignment for finance data, contracts, search, and evidence.
+- Transactional outbox, deduplication, saga, and compensation decisions.
+- Production-scale data, workload, query, connection, and observability testing.
+- Real source-system integration and evidence-backed supplier root-cause analysis.
 
-**Q4. Why didn't we add an index when `EXPLAIN` showed a sequential scan?**
-The table contains only 216 transaction rows. Sequential scanning can be cheaper than index traversal at that scale; the execution time was already very small. We need representative query load and growth before optimization.
+The platform is not production-ready. The current work is a controlled and validated foundation for subsequent API, security, distributed-systems, and investigation capabilities.
 
-### Compact mental model
+## 18. Takeaway
 
-**Reliable finance intelligence = correct relational facts + enforced invariants + atomic ingestion + safe retries + independent reconciliation + controlled authorization + evidence-backed investigation.**
+I implemented and validated a normalized PostgreSQL 17 finance foundation with exact monetary data, explicit ownership, constrained accounting periods, cross-table posting-date protection, atomic six-table ingestion, exact-match idempotency, and independent SQL reconciliation. The current evidence is strong for the tested development fixture and deliberately narrow outside it.
 
-## 13. How this document will evolve
-
-Keep this as **one living document for the database and financial-data foundation**, updated when related work is actually implemented and validated. Future sections can explain RLS, delegated access, auditing, period close and corrections, more realistic query tuning, larger ingestion loads, recovery, and source-to-document evidence. Do not mark planned controls as completed.
+MVCC, isolation, WAL, CAP, replication, and distributed recovery address different failure and concurrency boundaries. PostgreSQL local ACID does not provide cross-service atomicity, RLS is not yet enforced, and no HA or cross-region consistency guarantee has been validated. Future architecture decisions must state the required reporting snapshot, authorization boundary, data freshness, retry behavior, and recovery objective before adding distributed components.
