@@ -4,62 +4,144 @@
 **Scope:** PostgreSQL 17, relational integrity, financial data generation and ingestion, transactional behavior, distributed-systems design, reconciliation, access boundaries, and query performance
 **Document type:** Living architecture and engineering implementation record
 
-## 1. Objective and Scope
+## 1. Capability Mapping to Enterprise Architecture
 
-I implemented the initial structured-data foundation for a fictional multi-business-unit manufacturing company, Meridian Global Manufacturing. The current data covers Europe in EUR, India in INR, and the United States in USD. The reference investigation asks why Europe's operating margin declined from 18% in Q1 2026 to 14% in Q2 2026.
+The Database capability is the governed structured-data boundary in the overall FIN-AI architecture. I implemented PostgreSQL 17 as the current store for synthetic financial facts, accounting periods, reference data, and contract metadata. The integrated enterprise read path is designed but not implemented: the future Finance API will independently authorize a request at E3, use a least-privilege read repository, and rely on PostgreSQL RLS at E4 as defense in depth.
 
-This document owns the database and data-engineering concerns behind that investigation:
+The Python importer is a separate administrative ingestion path. It writes the six datasets directly through Psycopg using environment-provided database credentials; it does not call the Finance API and is not an agent tool. Its future operational authorization and dedicated write role remain open. This separation prevents the read-only application contract from being confused with controlled data loading.
 
-- Relational modeling, normalization, keys, and relationships.
-- PostgreSQL schema constraints, triggers, indexes, transactions, WAL, MVCC, isolation, and future RLS.
-- Synthetic financial data, CSV ingestion, natural-key resolution, rollback, and idempotency.
-- SQL reconciliation and execution-plan evidence.
-- Distributed consistency, CAP, replication, and cross-system recovery patterns as future design considerations.
+```mermaid
+flowchart LR
+    classDef implemented fill:#d8f3dc,stroke:#2d6a4f,color:#1b4332
+    classDef planned fill:#fff3bf,stroke:#b08900,color:#5f4b00,stroke-dasharray: 5 3
+    classDef control fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
 
-The detailed Finance API contracts and deterministic Python calculation layer are documented in [Finance_API_Architecture_And_Implementation.md](Finance_API_Architecture_And_Implementation.md). This database record does not duplicate those application-layer details.
+    subgraph AI["Enterprise AI application boundary"]
+        MCP["MCP finance tool caller\nPLANNED"]:::planned
+    end
 
-PostgreSQL 17 is the current system of record for structured synthetic finance data and contract metadata. Contract documents, search indexes, evidence retrieval, AI investigation, cross-region replication, and production security controls are not implemented.
+    subgraph READ["Authorized read/service boundary"]
+        E3["E3: Independent Finance API authorization\nPLANNED"]:::control
+        API["Finance API HTTP operation + repository\nPLANNED\ncontracts/calculation foundation IMPLEMENTED"]:::planned
+        READROLE["Least-privilege read role\nPLANNED"]:::control
+    end
 
-**Takeaway:** I separated governed financial facts and database controls from application contracts and future probabilistic investigation components.
+    subgraph DB["Governed database trust boundary"]
+        E4["E4: PostgreSQL RLS\nPLANNED defense in depth"]:::control
+        PG["PostgreSQL 17\nschema + synthetic data IMPLEMENTED"]:::implemented
+    end
 
-## 2. Architecture and Implementation Boundary
+    subgraph INGEST["Administrative ingestion boundary"]
+        FILES["Validated synthetic CSVs\nIMPLEMENTED"]:::implemented
+        IMPORTER["Python importer\nIMPLEMENTED"]:::implemented
+        WRITEROLE["Dedicated ingestion identity / write role\nPLANNED"]:::control
+    end
 
-The implemented data flow is:
+    MCP -->|"verified delegated context + finance request"| E3
+    E3 -->|"authorized read"| API
+    API --> READROLE
+    READROLE --> E4
+    E4 --> PG
+    PG -->|"RLS-filtered rows"| E4
+    E4 --> API
+    API -->|"typed financial response"| MCP
 
-```text
-Reproducible synthetic generator
-            |
-       Six CSV datasets
-            |
-Validation and type conversion in Python
-            |
-Natural-key to BIGINT key resolution
-            |
-Single PostgreSQL import transaction
-            |
-Constraints, foreign keys, and triggers
-            |
-Independent SQL reconciliation
+    FILES --> IMPORTER
+    IMPORTER -->|"current environment-configured credentials"| PG
+    WRITEROLE -. "future least-privilege credential" .-> IMPORTER
 ```
 
-The implemented PostgreSQL boundary stores financial facts and their reference data. The importer validates source shape and types before writing, but PostgreSQL remains the final shared integrity boundary for all writers. The SQL reconciliation independently checks persisted business meaning rather than trusting generator or importer status messages.
+The diagram is a logical capability mapping, not a claim that E3, E4, database roles, or runtime network controls are active. The approved application design contains no direct agent-to-database path. All future Finance API reads pass through E3 and the planned E4 database boundary. The importer remains outside that service path because ingestion and end-user reads have different identities, permissions, transaction behavior, and audit requirements.
 
-The current database contains a small controlled fixture, not production finance data. It does not implement a double-entry general ledger, period-close enforcement, financial approvals, adjustment workflows, foreign-exchange conversion, audit history, or source-system change data capture.
-
-## 3. Relational Model and Normalization
-
-### 3.1 Six-table schema
-
-I implemented the V001 migration with six tables:
-
-| Table | Database responsibility | Key relationships |
+| Capability element | Enterprise dependency and trust boundary | Status |
 |---|---|---|
-| `business_units` | Defines organizational ownership, region, and base currency | Parent of transactions and contracts |
-| `financial_periods` | Defines canonical calendar months and derived quarters | Parent of transactions |
-| `cost_categories` | Classifies expenses for operating-cost analysis | Optional transaction parent; required for expenses by rule |
-| `suppliers` | Identifies counterparties | Optional transaction parent and required contract parent |
-| `financial_transactions` | Stores positive revenue and expense facts | Required business unit and period; optional supplier; conditional category |
-| `contracts` | Stores supplier agreement metadata | Required supplier and business unit |
+| PostgreSQL structured store | Governed database boundary; source for authorized finance reads | Implemented and development-validated |
+| E4 PostgreSQL RLS | Database defense in depth after application authorization | Planned; no policies or tests exist |
+| Finance API repository | Authorized read consumer of PostgreSQL aggregates | Planned; HTTP route and repository do not exist |
+| E3 Finance API authorization | Independent business-unit authorization before repository access | Designed/planned; not implemented |
+| Python importer | Separate administrative ingestion client using parameterized Psycopg SQL | Implemented and integration-tested |
+| Ingestion identity and write role | Operational authorization for controlled data loading | Planned; current credentials are environment-configured |
+| Agent access | Narrow Finance API/MCP operation only | Designed; direct database access is prohibited |
+
+The Database capability depends on verified upstream user context for future reads, but PostgreSQL does not establish user identity. E3 owns the service authorization decision; E4 consumes trusted transaction-local context only as defense in depth. Administrative ingestion instead depends on an authorized workload identity and change process, not an end-user entitlement.
+
+## 2. Database Capability Solution Architecture
+
+The PostgreSQL capability has two implemented flows and one planned flow: deterministic fixture generation and ingestion, independent reconciliation, and a future authorized Finance API read path.
+
+```mermaid
+flowchart TB
+    classDef implemented fill:#d8f3dc,stroke:#2d6a4f,color:#1b4332
+    classDef validated fill:#cdeffd,stroke:#137c8b,color:#0b4650
+    classDef planned fill:#fff3bf,stroke:#b08900,color:#5f4b00,stroke-dasharray: 5 3
+    classDef control fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+
+    subgraph SOURCE["Synthetic source boundary"]
+        GEN["Deterministic generator\nIMPLEMENTED"]:::implemented
+        CSV["Six CSV datasets\n240 records IMPLEMENTED"]:::implemented
+    end
+
+    subgraph ADMIN["Administrative ingestion process"]
+        VALIDATE["CSV header validation + type conversion\nIMPLEMENTED"]:::implemented
+        TX["Single PostgreSQL import transaction\nIMPLEMENTED"]:::implemented
+        LOCK["Transaction-scoped advisory lock\nIMPLEMENTED"]:::implemented
+        KEYS["Natural-key lookup and BIGINT FK resolution\nIMPLEMENTED"]:::implemented
+        MATCH["Insert / exact-match reuse / conflict rejection\nIMPLEMENTED"]:::implemented
+        WRITEID["Dedicated ingestion identity / write role\nPLANNED"]:::control
+    end
+
+    subgraph DATABASE["PostgreSQL 17 trust boundary"]
+        SCHEMA["Six-table relational schema\nIMPLEMENTED"]:::implemented
+        RULES["PK, FK, UNIQUE, CHECK constraints\nand two posting-period triggers\nIMPLEMENTED"]:::implemented
+        READROLE["Least-privilege Finance API read role\nPLANNED"]:::control
+        RLS["E4 PostgreSQL RLS\nPLANNED"]:::control
+    end
+
+    subgraph READS["Read and validation consumers"]
+        RECON["Independent SQL reconciliation\nVALIDATED development evidence"]:::validated
+        E3["E3 Finance API authorization\nPLANNED"]:::control
+        REPO["Read-only Finance API repository\nPLANNED"]:::planned
+    end
+
+    GEN --> CSV
+    CSV --> VALIDATE
+    VALIDATE --> TX
+    TX --> LOCK
+    LOCK --> KEYS
+    KEYS --> MATCH
+    MATCH -->|"current administrative inserts"| SCHEMA
+    WRITEID -. "future database credential" .-> TX
+    SCHEMA --- RULES
+
+    RECON -->|"offline development queries"| SCHEMA
+    SCHEMA -->|"reconciled aggregates"| RECON
+
+    E3 -->|"authorized business-unit request"| REPO
+    REPO --> READROLE
+    READROLE --> RLS
+    RLS --> SCHEMA
+    SCHEMA -->|"RLS-filtered rows"| RLS
+    RLS --> REPO
+```
+
+The transaction block in the diagram represents the implemented `connection.transaction()` context. The advisory lock is acquired inside that transaction before table processing. CSV header and value conversion occurs before the importer opens the database connection. Natural-key resolution and exact-match comparisons occur while the transaction is active.
+
+The planned read flow is deliberately separate: E3 authorizes the Finance API request, the repository uses a read-only database role, and E4 applies row filtering before data is returned. The independent reconciliation path is retained as development validation evidence, not as an application endpoint or an authorization bypass. No agent, MCP component, or model receives PostgreSQL credentials.
+
+## 3. Database Detailed Solution Design
+
+### 3.1 Schema responsibilities and relationships
+
+I implemented the V001 migration with six normalized tables:
+
+| Table | Responsibility | Relationships and ownership |
+|---|---|---|
+| `business_units` | Defines organizational ownership, region, base currency, and active state | Parent of transactions and contracts; future RLS scope |
+| `financial_periods` | Defines canonical monthly periods and stored quarter | Parent of transactions; calendar boundaries constrained |
+| `cost_categories` | Classifies operating expenses | Nullable transaction parent; required for expenses by rule |
+| `suppliers` | Identifies supplier counterparties | Nullable transaction parent and required contract parent |
+| `financial_transactions` | Stores positive revenue and expense facts with source traceability and posting status | Required business unit and period; optional supplier; category conditional on type |
+| `contracts` | Stores supplier contract metadata and classification | Required supplier and business unit |
 
 ```mermaid
 erDiagram
@@ -71,33 +153,90 @@ erDiagram
     suppliers ||--o{ contracts : signs
 ```
 
-I selected `BIGINT GENERATED ALWAYS AS IDENTITY` surrogate primary keys for internal relationships. External datasets use stable natural keys such as `EU`, `LOGISTICS`, supplier codes, year-month period keys, contract numbers, and transaction source references. The importer resolves these values to database identities rather than assuming sequence values.
+PostgreSQL `NUMERIC(18,2)` and Python `Decimal` preserve two-decimal financial values. Transaction amounts are positive magnitudes, while `transaction_type` supplies revenue or expense meaning. Currency remains explicit on transactions; cross-currency aggregation requires a future governed FX policy.
 
-Normalization keeps business-unit, period, category, and supplier attributes in their own tables. This avoids repeating names and classifications on each transaction and reduces contradictory updates. The trade-off is that reporting and investigation queries require joins.
+### 3.2 Key and foreign-key design
 
-The composite unique constraint on `(business_unit_id, source_reference)` reflects the source system's transaction identity within an owning business unit. It supports traceability and idempotent import decisions without asserting that one source reference is globally unique.
+I selected `BIGINT GENERATED ALWAYS AS IDENTITY` primary keys for internal relationships and stable natural keys for external data exchange. The importer maps business-unit, period, category, and supplier identifiers to database identities and never assumes sequence values. Foreign keys protect required and nullable relationships.
 
-### 3.2 Monetary and currency representation
+Unique business keys cover unit, category, supplier, contract, and financial year/month identifiers. `(business_unit_id, source_reference)` prevents duplicate upstream transactions within one owning unit. Normalization reduces contradictory reference data at the cost of join complexity.
 
-I selected PostgreSQL `NUMERIC(18,2)` for transaction amounts and Python `Decimal` for generation and ingestion. Binary floating-point values are not used for money. The generator and importer preserve two fractional digits, and the schema requires each stored transaction amount to be greater than zero.
+### 3.3 Transaction, rollback, and idempotency boundaries
 
-Revenue and expense direction is represented by `transaction_type`; amounts remain positive magnitudes. This simplifies the initial analytical fixture but is not a substitute for debit/credit accounting. Each transaction carries an explicit three-letter uppercase currency code. Reports must remain segregated by currency unless a governed exchange-rate policy is introduced.
+The importer validates and converts all CSV files before opening a database connection. Database work then runs inside one transaction covering the advisory lock, reference-table processing, transaction loading, and contract loading. Any unhandled validation, conflict, constraint, trigger, or database exception aborts that complete write set.
 
-### 3.3 Calendar periods
+For each natural key, the importer inserts an absent row, reuses an exact existing match, or raises `ImportConflictError` when stored business values differ. It never silently overwrites financial data. The transaction-scoped advisory lock serializes cooperating importer executions that use the same lock identifier, while unique constraints remain the database safeguard for other writers. Sequential idempotency and complete rollback were validated; concurrent importer behavior was not.
 
-The model uses one row per calendar month. Constraints enforce:
+### 3.4 Integrity and trigger enforcement
 
-- Positive financial year.
-- Month values from 1 through 12.
-- Quarter values from 1 through 4.
-- Quarter derived consistently from the month.
-- Period start on the first calendar day of the month.
-- Period end on the last calendar day of the month.
-- One period per financial year and month.
+Declarative constraints enforce required values, uniqueness, positive amounts, currencies, transaction and posting types, category rules, period construction, and contract validity. Foreign keys protect relationships.
 
-FY2026 follows the calendar year. Quarter is stored for reporting convenience but constrained against month to prevent divergent dimensions.
+Two trigger functions enforce the cross-table posting-period invariant. Transaction inserts or date/period changes lock and read the referenced period with `FOR SHARE`; period updates are rejected if they would exclude an existing transaction. These triggers do not enforce period close, authorization, reconciliation, FX, audit, or RLS controls.
 
-**Design trade-off:** Storing a derivable quarter makes common reporting simpler while adding a value that must be protected by a constraint. A future fiscal calendar that differs from the calendar year would require an approved schema evolution rather than bypassing the current rule.
+### 3.5 Read and aggregation boundary
+
+Independent SQL reconciliation has validated the stored development scenario at business-unit, accounting-period, posting-status, and currency grain. It is not a production Finance API implementation, and the exact historical `EXPLAIN` query remains unavailable as recorded later in this document.
+
+The future Finance API repository is the only approved application read consumer. E3 must independently authorize the requested business unit before repository execution. The repository should expose named, parameterized aggregate operations rather than arbitrary SQL and should use a dedicated read-only role. E4 RLS is planned to filter rows using trusted transaction-local context. No direct agent-to-database access is approved.
+
+### 3.6 Isolation and consistency considerations
+
+The importer does not explicitly select an isolation level; it uses the connection's configured PostgreSQL behavior and adds a cooperative advisory lock. The single transaction prevents partial six-table commits, but concurrent writers that ignore the advisory lock require separate analysis. The posting-period row lock protects one specific cross-table race.
+
+For future reports, one aggregate SQL statement receives one statement snapshot under PostgreSQL `READ COMMITTED`. Multi-statement reporting may need a stronger snapshot strategy. Serializable retries, concurrent reporting behavior, unknown commit outcomes, crash recovery, and replica consistency have not been validated. Sections 7 through 11 retain the detailed ACID, WAL, MVCC, CAP, and distributed-recovery analysis.
+
+### 3.7 Security and RLS boundaries
+
+PostgreSQL currently stores business-unit ownership but does not enforce RLS. E3 is the future Finance API authorization boundary; E4 is planned database defense in depth, not a replacement for E3 or proof of identity. A transaction-local setting can carry verified scope but cannot authenticate a caller.
+
+The read repository and importer require separate least-privilege roles. The read role should not write or bypass RLS. The ingestion role needs only the controlled writes required by the load process and must not become an agent or end-user credential. Database owner, superuser, `BYPASSRLS`, maintenance, migration, and emergency paths need explicit governance. These role and policy controls are not implemented or tested.
+
+### 3.8 Error and failure behavior
+
+| Failure | Implemented or designed behavior |
+|---|---|
+| Invalid CSV header or value | `DataValidationError` before database connection where detected |
+| Missing natural-key reference | Reject the record and abort the import attempt |
+| Existing key with different values | Raise `ImportConflictError`; do not update silently |
+| Constraint or trigger violation | PostgreSQL rejects the statement and the import transaction rolls back |
+| Failure after earlier inserts in the same import | Transaction context rolls back the complete attempt |
+| Unauthorized future Finance API read | E3 must fail closed; E4 provides planned additional row filtering |
+| Missing financial data | Future API must report data unavailable and must not invent figures |
+| Lock wait, deadlock, connection loss, or unknown commit | Operational timeout, retry, and reconciliation policy remains unresolved |
+
+### 3.9 Principal decisions and trade-offs
+
+| Decision | Rationale | Trade-off or limitation |
+|---|---|---|
+| Normalized PostgreSQL schema | Centralized constraints and trustworthy relationships | Reports require joins; model is not a full general ledger |
+| Natural keys plus surrogate identities | Stable external references and efficient internal relationships | Importer must resolve keys during every load |
+| One six-table transaction | Prevents partial dataset commits | Larger loads may hold locks and resources longer |
+| Exact-match idempotency | Makes sequential retries safe and exposes conflicting data | Authorized corrections need a separate governed process |
+| Transaction-scoped advisory lock | Coordinates cooperating importers | Other writers can ignore it; concurrency remains untested |
+| Finance API instead of direct agent SQL | Centralizes authorization, query grain, contracts, and provenance | Adds a service boundary that remains unimplemented |
+| E3 plus planned E4 | Service authorization plus database defense in depth | Identity propagation, roles, policies, and negative tests remain open |
+| Evidence-based indexing | Avoids tuning a 216-row fact table prematurely | Representative workload evidence is still required |
+
+### 3.10 Design-to-code traceability
+
+| Design responsibility | Source file or component | Implementation status | Validation evidence |
+|---|---|---|---|
+| Six-table schema, constraints, triggers, and indexes | `db/migrations/V001__initial_finance_schema.sql` | Implemented | Migration executed in PostgreSQL 17; 27 SQL integrity tests passed |
+| Deterministic synthetic datasets | `scripts/generate_synthetic_finance.py`; `data/synthetic/` | Implemented and validated | 11 generator tests; 240 generated records |
+| CSV validation and type conversion | `scripts/import_synthetic_finance.py:load_dataset()` | Implemented and validated | Generator round-trip coverage and importer integration tests |
+| Natural-key resolution and parameterized writes | `scripts/import_synthetic_finance.py:import_dataset()` | Implemented and validated | All six datasets loaded; source counts matched |
+| Atomic import and rollback | `connection.transaction()` in `import_dataset()` | Implemented and validated | Invalid-input integration test left no isolated test records |
+| Exact-match idempotency and conflict rejection | `_assert_match()` and table import loops | Implemented and validated | Reimport unchanged; conflict and duplicate checks passed |
+| Importer serialization | `pg_advisory_xact_lock()` in `import_dataset()` | Implemented; concurrency behavior not validated | Code inspection only for concurrency; no concurrent-run evidence |
+| Posting-period integrity | Two PL/pgSQL trigger functions in V001 | Implemented and validated | Both trigger directions covered by SQL integrity tests |
+| Financial reconciliation | PostgreSQL aggregate validation recorded in this document | Validated development evidence | Europe 18% Q1 and 14% Q2; EUR 4M expense variance reconciled |
+| Finance API request/response and arithmetic foundation | `finance_api/contracts.py`; `finance_api/calculations.py` | Implemented and validated, but not database-integrated | 16 contract tests and 10 calculation tests |
+| Finance API HTTP repository | Planned component | Planned | No implementation or integration tests |
+| E3 business-unit authorization | Enterprise architecture control | Designed/planned | No implementation or security tests |
+| Least-privilege read and ingestion roles | PostgreSQL role design | Planned | No role definitions or privilege tests |
+| E4 PostgreSQL RLS | PostgreSQL policy design | Planned | No policies, identity context, or negative-access tests |
+
+The current database remains a controlled development fixture rather than a double-entry general ledger or production data platform. It does not implement enforced period close, approvals, adjustments, audit history, governed FX, source-system change capture, HA, or disaster recovery.
 
 ## 4. Integrity Controls, Triggers, and Locking
 
@@ -297,7 +436,7 @@ CAP concerns a distributed data system when a network partition prevents nodes f
 
 - **Consistency** means a linearizable view: operations appear to occur atomically in one real-time order.
 - **Availability** means every request to a non-failing node receives a non-error response, without waiting indefinitely.
-- **Partition tolerance** means the system continues operating despite lost or delayed communication between nodes.
+- **Partition tolerance** means the distributed system is designed to handle communication partitions, potentially restricting some operations to preserve its consistency guarantees.
 
 “Pick any two of three” is misleading as a general architecture rule. Partition tolerance means the design accounts for communication failure; it does not guarantee that requests remain available during a partition. In a real distributed deployment, network partitions must be anticipated. During a partition, a design may reject or delay operations to preserve strong or linearizable consistency, or accept operations that may temporarily diverge to preserve availability. Outside a partition, latency, durability, and consistency still involve separate choices.
 

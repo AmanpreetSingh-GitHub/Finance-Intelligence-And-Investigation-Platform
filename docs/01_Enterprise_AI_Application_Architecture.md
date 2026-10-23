@@ -25,7 +25,7 @@ The architecture requirements are:
 - **Reliability:** apply timeouts, cancellation, retry classification, dependency isolation, and explicit partial-failure behavior.
 - **Governed access:** preserve business-unit and document classifications across API, tool, database, and object-storage boundaries.
 
-The detailed database foundation is recorded in [Database_And_Financial_Data_Foundation.md](Database_And_Financial_Data_Foundation.md). The implemented Finance API contracts and calculation function are recorded in [Finance_API_Architecture_And_Implementation.md](Finance_API_Architecture_And_Implementation.md).
+The detailed database foundation is recorded in [02_Database_And_Financial_Data_Foundation.md](02_Database_And_Financial_Data_Foundation.md). The implemented Finance API contracts and calculation function are recorded in [03_Finance_API_Architecture_And_Implementation.md](03_Finance_API_Architecture_And_Implementation.md).
 
 ## 2. Status Model
 
