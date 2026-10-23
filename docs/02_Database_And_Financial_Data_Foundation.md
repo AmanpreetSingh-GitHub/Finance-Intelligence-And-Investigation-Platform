@@ -11,7 +11,7 @@ The Database capability is the governed structured-data boundary in the overall 
 The Python importer is a separate administrative ingestion path. It writes the six datasets directly through Psycopg using environment-provided database credentials; it does not call the Finance API and is not an agent tool. Its future operational authorization and dedicated write role remain open. This separation prevents the read-only application contract from being confused with controlled data loading.
 
 ```mermaid
-flowchart LR
+flowchart TB
     classDef implemented fill:#d8f3dc,stroke:#2d6a4f,color:#1b4332
     classDef planned fill:#fff3bf,stroke:#b08900,color:#5f4b00,stroke-dasharray: 5 3
     classDef control fill:#dbeafe,stroke:#2563eb,color:#1e3a8a

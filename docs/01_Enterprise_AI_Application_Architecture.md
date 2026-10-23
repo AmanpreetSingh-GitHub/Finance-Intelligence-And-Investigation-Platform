@@ -42,7 +42,7 @@ Current implemented scope consists of the PostgreSQL 17 schema, synthetic data g
 ## 3. Component and Trust-Boundary Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     classDef implemented fill:#d8f3dc,stroke:#2d6a4f,color:#1b4332
     classDef planned fill:#fff3bf,stroke:#b08900,color:#5f4b00,stroke-dasharray: 5 3
     classDef control fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
